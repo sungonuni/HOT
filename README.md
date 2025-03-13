@@ -1,7 +1,4 @@
 # \[CVPR 2025\] HOT: Hadamard-based Optimized Training
-
-**Seonggon Kim, Juncheol Shin, Seung-taek Woo and Eunhyeok Park**
-
 This repositorty is official code of HOT: Hadamard-based Optimized Training.
 
 
@@ -12,13 +9,14 @@ It has become increasingly important to optimize backpropagation to reduce memor
 ### Training code
 You can reproduce the accuracy, memory reduction, computation cost result of HOT during finetuning ViT-B with CIFAR100.
 
-(Directory)
+```
 hot_cvpr2025/
-├── main.sh              
+├── main.sh    
 ├── memory_analysis.sh
 ├── gbops_analysis.sh
 └── cuda_measure/
     └── measure.py
+```
 
 ### How to run
 
