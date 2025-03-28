@@ -1,23 +1,12 @@
-# \[CVPR 2025\] HOT: Hadamard-based Optimized Training [Paper](https://arxiv.org/abs/2503.21261)
+# \[CVPR 2025\] HOT: Hadamard-based Optimized Training
 This repositorty is official code of HOT: Hadamard-based Optimized Training. HOT achieves up to 75% memory savings and a 2.6X acceleration on real GPUs, with negligible accuracy loss compared to FP32 precision.
+
+[![arXiv](https://img.shields.io/badge/arXiv-2503.21261-b31b1b.svg)](https://arxiv.org/abs/arXiv-2503.21261)
 
 ![main_figure](./images/main_figure.png)
 
 ## Overview
 It has become increasingly important to optimize backpropagation to reduce memory usage and computational overhead. Achieving this goal is highly challenging, as multiple objectives must be considered jointly while maintaining training quality. In this paper, we focus on matrix multiplication, which accounts for the largest portion of training costs, and analyze its backpropagation in detail to identify lightweight techniques that offer the best benefits. Based on this analysis, we introduce a novel method, Hadamard-based Optimized Training (HOT). In this approach, we apply Hadamard-based optimizations, such as Hadamard quantization and Hadamard low-rank approximation, selectively and with awareness of the suitability of each optimization for different backward paths. Additionally, we introduce two enhancements: activation buffer compression and layer-wise quantizer selection. Our extensive analysis shows that HOT achieves up to 75% memory savings and a 2.6X acceleration on real GPUs, with negligible accuracy loss compared to FP32 precision.
-
-## Result
-
-<img src="./images/mem_analysis1.png" alt="Image 1" width="49%" style="display:inline-block"/>
-<img src="./images/mem_analysis2.png" alt="Image 2" width="49%" style="display:inline-block"/>  
-
-(Left) Memory requirements with varying batch sizes, and (Right) Component-wise memory consumption breakdown with a batch size 256 on training ViT-B with ImageNet-1k dataset.  
-
-  
-
-<img src="./images/comp_analysis.png" alt="Image 2" width="49%"/>  
-
-Computational costs when applying HOT and existing methods across various models.
 
 ## Demo code
 You can reproduce the accuracy, memory reduction, computation cost result of HOT during finetuning ViT-B with CIFAR100.
