@@ -1,4 +1,4 @@
-# \[CVPR 2025\] HOT: Hadamard-based Optimized Training
+# \[CVPR 2025\] HOT: Hadamard-based Optimized Training [Paper](https://arxiv.org/abs/2503.21261)
 This repositorty is official code of HOT: Hadamard-based Optimized Training. HOT achieves up to 75% memory savings and a 2.6X acceleration on real GPUs, with negligible accuracy loss compared to FP32 precision.
 
 ![main_figure](./images/main_figure.png)
@@ -75,3 +75,15 @@ Current code requires:
 
 ### Cite
 If you find our code or HOT useful for your research, please consider citing:
+
+```
+@misc{kim2025hothadamardbasedoptimizedtraining,
+      title={HOT: Hadamard-based Optimized Training}, 
+      author={Seonggon Kim and Juncheol Shin and Seung-taek Woo and Eunhyeok Park},
+      year={2025},
+      eprint={2503.21261},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2503.21261}, 
+}
+```
