@@ -1,7 +1,7 @@
-# \[CVPR 2025\] HOT: Hadamard-based Optimized Training
+# HOT: Hadamard-based Optimized Training
 This repositorty is official code of HOT: Hadamard-based Optimized Training. HOT achieves up to 75% memory savings and a 2.6X acceleration on real GPUs, with negligible accuracy loss compared to FP32 precision.
 
-[![arXiv](https://img.shields.io/badge/arXiv-2503.21261-b31b1b.svg)](https://arxiv.org/abs/arXiv-2503.21261)
+[![arXiv](https://img.shields.io/badge/arXiv-2503.21261-b31b1b.svg)](https://arxiv.org/abs/2503.21261)
 
 ![main_figure](./images/main_figure.png)
 
