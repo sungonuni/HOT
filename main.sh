@@ -5,6 +5,7 @@ python ViT_main.py \
     --MODEL Q_vit_b \
     --PRETRAINED true \
     --DATASET cifar100 \
+    --DATA_DIR /home3/sungonuni/dataset \
     --AMP false \
     --EPOCHS 50 \
     --BATCH_SIZE 128 \
