@@ -29,6 +29,12 @@ Current code requires:
     ```
     pip install -r requirements.txt
     ```
+    
+    Install the [tensorcast](https://github.com/ROCm/tensorcast) in HOT directory.
+    ```
+    git clone https://github.com/ROCm/tensorcast.git
+    ```
+
 2. Train the ViT-B with cifar100. 
     
     Note that training code is conducted on fake quant, not real quant. This code is only for validate the accuracy of HOT pipeline, thus memory reduction and acceleration is not optimized. 

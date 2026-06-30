@@ -7,6 +7,10 @@ import os
 import sys
 sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 
+# tensorcast (tcast) provides FP4 (e2m1) / MXFP4 fake quantization.
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(os.path.dirname(__file__))), "tensorcast"))
+import tcast
+
 from torch.autograd.function import Function
 from utils.hadamard_matmul import *
 from utils.utils import batch_z_score_threshold
@@ -165,6 +169,89 @@ quant_scheme_dict = {
     "norm_quantizer": norm_quantizer,
 }
 
+# ---------------------------------------------------------------------------
+# FP4 / MXFP4 fake quantization via tensorcast (tcast)
+# ---------------------------------------------------------------------------
+# tcast performs *virtual* (fake) quantization: it returns a float tensor that
+# has been quantized to the target format and then rescaled back to float.
+# Unlike the INT quantizers above there is NO separate integer tensor + scale,
+# so the returned scale is always 1.0 (the rescale is baked into the tensor).
+# This lets a tensor quantized to mxfp4/fp4 be mixed freely in the same matmul
+# with an INT-quantized tensor: ``(a @ b) * scale_a * scale_b`` still holds.
+#
+#   mxfp4 : OCP MXFP4  -> e2m1 elements sharing one e8m0 power-of-two scale per
+#                         32-element tile along the last (contraction) dim.
+#   fp4   : per-tensor -> e2m1 elements with a single e8m0 scale for the whole
+#                         tensor (no tile-size divisibility constraint).
+#
+# Stochastic rounding is intentionally NOT applied to FP formats: rounding is
+# handled internally by tcast (default round-to-nearest-even).
+FP_QUANT_SCHEMES = ("mxfp4", "fp4")
+INT8_STORABLE_SCHEMES = ("int", "stoch", "sawb")  # produce int-valued tensors that fit torch.int8
+
+_tcast_dtype_cache = {}
+
+def _get_tcast_dtype(fp_format):
+    if fp_format not in _tcast_dtype_cache:
+        if fp_format == "mxfp4":
+            _tcast_dtype_cache[fp_format] = tcast.mxfp4e2                                  # e2m1fnuz + e8m0_t32
+        elif fp_format == "fp4":
+            _tcast_dtype_cache[fp_format] = tcast.datatype("e2m1fnuz", "e8m0", "fp4_e8m0")  # per-tensor e8m0
+        else:
+            raise Exception('FP quant format not implemented: ' + str(fp_format))
+    return _tcast_dtype_cache[fp_format]
+
+def fp_quantizer(x, fp_format):
+    '''tensorcast fake-quant. Returns (quantized_float_tensor, scale=1.0).'''
+    dtype = _get_tcast_dtype(fp_format)
+    # MXFP4 tiles the last dim in groups of 32. If it isn't a multiple of 32,
+    # zero-pad up to the next multiple, quantize, then slice back. Padding zeros
+    # don't change any tile's max-abs (the per-tile e8m0 scale), so the real
+    # elements get exactly their proper tile scale.
+    if fp_format == "mxfp4":
+        tile = 32
+        last = x.shape[-1]
+        pad = (-last) % tile
+        if pad:
+            x = F.pad(x, (0, pad))
+            xq = tcast.vcast(x, dtype).clone()
+            return xq[..., :last], 1.0
+    # tcast.cast runs under @torch.inference_mode, so vcast returns an inference
+    # tensor that cannot be saved for backward. Clone it to a normal tensor.
+    xq = tcast.vcast(x, dtype).clone()
+    return xq, 1.0
+
+def quantize_tensor(x, scheme, quantBits, is_batched):
+    '''Dispatch quantization by scheme.
+
+    INT-family schemes return (int-valued float tensor, scale) for an integer
+    GEMM that is rescaled afterwards.  FP/MXFP schemes use tcast fake-quant and
+    return (float tensor, 1.0).'''
+    if scheme in FP_QUANT_SCHEMES:
+        return fp_quantizer(x, scheme)
+    elif scheme == 'int':
+        return int_quantizer(x, quantBits, is_batched)
+    elif scheme == 'stoch':
+        return stoch_quantizer(x, quantBits, is_batched)
+    elif scheme == 'sawb':
+        return sawb_quantizer(x, quantBits, is_batched)
+    elif scheme == 'luq':
+        return luq_quantizer(x, quantBits, is_batched)
+    elif scheme == 'nq':
+        return norm_quantizer(x, quantBits, is_batched)
+    elif scheme == 'no' or scheme == False:
+        return x, 1.0
+    else:
+        raise Exception('Quant scheme not implemented: ' + str(scheme))
+
+def _check_gemm_mode():
+    '''realGEMM (Triton GEMM) is not implemented yet; only fakeGEMM is supported.'''
+    if getattr(args, 'realGEMM', False):
+        raise NotImplementedError(
+            "realGEMM (Triton GEMM backward) is not implemented yet. "
+            "TODO: dispatch to the Triton low-precision GEMM kernels here. "
+            "Set --realGEMM false / --fakeGEMM true to use tcast fake quantization.")
+
 # INT Matmul via F.Linear
 class FLinearQ(Function):
     generate_vmap_rule = True
@@ -193,26 +280,24 @@ class FLinearQ(Function):
         elif args.TransformInput == False:
             None
         
-        if args.quantBWDAct == 'int':
-            x, scale_x = int_quantizer(x, args.actQuantBit, is_batched_x)
+        _check_gemm_mode()
+        x, scale_x = quantize_tensor(x, args.quantBWDAct, args.actQuantBit, is_batched_x)
+        # INT-quantized activations are stored as int8 to save memory; FP4/MXFP4
+        # fake-quant stays float (already rescaled) and feeds a float matmul.
+        if args.quantBWDAct in INT8_STORABLE_SCHEMES:
             x = x.to(torch.int8)
-        elif args.quantBWDAct == 'stoch':
-            x, scale_x = stoch_quantizer(x, args.actQuantBit, is_batched_x)
-            x = x.to(torch.int8)
-        elif args.quantBWDAct == 'sawb':
-            x, scale_x = sawb_quantizer(x, args.actQuantBit, is_batched_x)
-            x = x.to(torch.int8)
-        elif args.quantBWDAct == 'no' or args.quantBWDAct == False:
-            scale_x = torch.Tensor([1.]).to(x.device)
-            None
-        else:
-            raise Exception('Activation rounding scheme not implemented: ' + args.quantBWDAct)
-        
+
+        # save_for_backward only accepts tensors; FP4/MXFP4 and 'no' return a
+        # scalar scale, so materialize it as a tensor (1.0 is a no-op rescale).
+        if not torch.is_tensor(scale_x):
+            scale_x = torch.tensor([float(scale_x)], device=x.device)
+
         ctx.name = inputs[4]
         ctx.save_for_backward(x, inputs[1], inputs[2], inputs[3], scale_x)
 
     @staticmethod
     def backward(ctx, grad_output):
+        _check_gemm_mode()
         layer_name = ctx.name
         x, w, h_out, h_bs, scale_x = ctx.saved_tensors
         if w.dtype == torch.bfloat16:
@@ -243,18 +328,8 @@ class FLinearQ(Function):
         
         if args.quantAuto and len(args.layer_quant_dict) > 0:
             grad_output_ho, scale_gogi= quant_scheme_dict[args.layer_quant_dict[layer_name+'_gx']](grad_output_ho, args.GogiQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogi == 'int':
-            grad_output_ho, scale_gogi= int_quantizer(grad_output_ho, args.GogiQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogi == 'stoch':
-            grad_output_ho, scale_gogi= stoch_quantizer(grad_output_ho, args.GogiQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogi == 'luq':
-            grad_output_ho, scale_gogi= luq_quantizer(grad_output_ho, args.GogiQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogi == 'nq':
-            grad_output_ho, scale_gogi= norm_quantizer(grad_output_ho, args.GogiQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogi == 'no' or args.quantBWDGogi == False:
-            scale_gogi = 1.  
         else:
-            raise Exception('GradHo rounding scheme not implemented: ' + args.quantBWDGogi)
+            grad_output_ho, scale_gogi= quantize_tensor(grad_output_ho, args.quantBWDGogi, args.GogiQuantBit, is_batched_grad_output)
 
         # Hadamard transformation of weight tensor in FP and Quantization to INT
         if args.TransformWgt == True:
@@ -273,16 +348,7 @@ class FLinearQ(Function):
         elif args.TransformWgt == False:
             None
         
-        if args.quantBWDWgt == 'int':
-            w, scale_w = int_quantizer(w, args.weightQuantBit, is_batched_w)
-        elif args.quantBWDWgt == 'stoch':
-            w, scale_w = stoch_quantizer(w, args.weightQuantBit, is_batched_w)
-        elif args.quantBWDWgt == 'sawb':
-            w, scale_w = sawb_quantizer(w, args.weightQuantBit, is_batched_w)
-        elif args.quantBWDWgt == 'no' or args.quantBWDWgt == False:
-            scale_w = 1.
-        else:
-            raise Exception('Weight rounding scheme not implemented: ' + args.quantBWDWgt)
+        w, scale_w = quantize_tensor(w, args.quantBWDWgt, args.weightQuantBit, is_batched_w)
 
         # Compute the gradient of activation in INT and clamping
         grad_input = (grad_output_ho @ w) * \
@@ -306,18 +372,8 @@ class FLinearQ(Function):
         
         if args.quantAuto and len(args.layer_quant_dict) > 0:
             grad_output_hb, scale_gogw= quant_scheme_dict[args.layer_quant_dict[layer_name+'_gw']](grad_output_hb, args.GogiQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogw == 'int':
-            grad_output_hb, scale_gogw = int_quantizer(grad_output_hb, args.GogwQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogw == 'stoch':
-            grad_output_hb, scale_gogw = stoch_quantizer(grad_output_hb, args.GogwQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogw == 'luq':
-            grad_output_hb, scale_gogw = luq_quantizer(grad_output_hb, args.GogwQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogw == 'nq':
-            grad_output_hb, scale_gogw = norm_quantizer(grad_output_hb, args.GogwQuantBit, is_batched_grad_output)
-        elif args.quantBWDGogw == 'no' or args.quantBWDGogw == False:
-            scale_gogw = 1.
         else:
-            raise Exception('GradHb rounding scheme not implemented: ' + args.quantBWDGogw)
+            grad_output_hb, scale_gogw = quantize_tensor(grad_output_hb, args.quantBWDGogw, args.GogwQuantBit, is_batched_grad_output)
 
         grad_w = (grad_output_hb @ x.to(grad_output_hb.dtype)) * \
             (scale_gogw.unsqueeze(1).unsqueeze(2) if is_batched_grad_output and torch.is_tensor(scale_gogw) else scale_gogw) * \

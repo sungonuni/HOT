@@ -5,6 +5,9 @@ from utils.plot import Tensor_Dict2
 GPU_USE = " "
 RUN_NAME = ' '
 DEBUG_MODE = False # False when train
+WANDB = False # Enable Weights & Biases logging
+WANDB_PROJECT = "HOT"
+WANDB_ENTITY = None
 MODEL = ' ' # Q_resnet18, Q_resnet34, Q_efficientnetv2_s, Q_resnet50, Q_efficientformer_l1, Q_efficientformerv2_l, Q_swinv2_b, Q_swinv2_l 
 PRETRAINED = False
 CONTINUE = False
@@ -33,11 +36,17 @@ actQuantBit = 0
 
 eps = 1e-11
 
+# GEMM backend selection
+#   realGEMM : run the (Triton) low-precision GEMM kernels in backward. (TODO: not implemented yet)
+#   fakeGEMM : simulate low-precision via tensorcast fake-quant + float matmul.
+realGEMM = False
+fakeGEMM = True
+
 quantAuto = False
-quantBWDGogi = "no" # int, stoch, no, luq
-quantBWDWgt = "no" # int, stoch, no, sawb
-quantBWDGogw = "no" # int, stoch, no, luq
-quantBWDAct = "no" # int, stoch, no, sawb
+quantBWDGogi = "no" # int, stoch, no, luq, nq, fp4, mxfp4
+quantBWDWgt = "no" # int, stoch, no, sawb, fp4, mxfp4
+quantBWDGogw = "no" # int, stoch, no, luq, nq, fp4, mxfp4
+quantBWDAct = "no" # int, stoch, no, sawb, fp4, mxfp4
 
 vectorPercentile = 50
 

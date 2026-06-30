@@ -1,7 +1,9 @@
 python ViT_main.py \
     --GPU_USE 0 \
-    --RUN_NAME vit_b_cifar100_HLQ \
+    --RUN_NAME vit_b_cifar100_HOT_giINT4_gwFP4 \
     --DEBUG_MODE false \
+    --WANDB true \
+    --WANDB_PROJECT Hadamard_Quant \
     --MODEL Q_vit_b \
     --PRETRAINED true \
     --DATASET cifar100 \
@@ -11,6 +13,14 @@ python ViT_main.py \
     --BATCH_SIZE 128 \
     --LR 2.5e-5 \
     --SEED 2024 \
+    \
+    --realGEMM false \
+    --fakeGEMM true \
+    --quantAuto false \
+    --quantBWDGogi int \
+    --quantBWDWgt int \
+    --quantBWDGogw mxfp4 \
+    --quantBWDAct mxfp4 \
     \
     --precisionScheduling false \
     --milestone 50 \

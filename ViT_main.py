@@ -21,6 +21,11 @@ from utils.quant_matmul import HQ_Conv2d, HQ_Linear, stoch_quantizer, norm_quant
 import random
 import args
 import argparse
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 from timm.utils import accuracy
 from timm.data import Mixup
 from timm.models import create_model
@@ -71,6 +76,9 @@ def get_args_parser():
     parser.add_argument('--GPU_USE', default='4', type=str)
     parser.add_argument('--RUN_NAME', default='', type=str)
     parser.add_argument('--DEBUG_MODE', type=str2bool, default=False, help='False when train')
+    parser.add_argument('--WANDB', type=str2bool, default=False, help='Enable Weights & Biases logging')
+    parser.add_argument('--WANDB_PROJECT', type=str, default='HOT', help='wandb project name')
+    parser.add_argument('--WANDB_ENTITY', type=str, default=None, help='wandb entity/team (default: your default entity)')
     parser.add_argument('--MODEL', type=str, help='Q_efficientformer_l1, Q_efficientformerv2_l, Q_swinv2_b, Q_swinv2_l')
     parser.add_argument('--PRETRAINED', type=str2bool, help='imagenet pretrained')
     parser.add_argument('--CONTINUE', type=str2bool, default=False, help='continue training from ckpt file')
@@ -97,11 +105,14 @@ def get_args_parser():
     parser.add_argument('--actQuantBit', default=4, type=int)
     parser.add_argument('--eps', type=float, default=1e-11)
 
+    parser.add_argument('--realGEMM', type=str2bool, default=False, help='Run Triton low-precision GEMM in backward (TODO: not implemented)')
+    parser.add_argument('--fakeGEMM', type=str2bool, default=True, help='Simulate low precision via tensorcast fake-quant + float matmul')
+
     parser.add_argument('--quantAuto', default=True, type=str2bool, help='Auto quant sheme')
-    parser.add_argument('--quantBWDGogi', default='nq', type=str, help='int, stoch, no, luq')
-    parser.add_argument('--quantBWDWgt', default='sawb', type=str, help='int, stoch, no, luq')
-    parser.add_argument('--quantBWDGogw', default='nq', type=str, help='int, stoch, no, luq')
-    parser.add_argument('--quantBWDAct', default='sawb', type=str, help='int, stoch, no, luq')
+    parser.add_argument('--quantBWDGogi', default='nq', type=str, help='int, stoch, no, luq, nq, fp4, mxfp4')
+    parser.add_argument('--quantBWDWgt', default='sawb', type=str, help='int, stoch, no, sawb, fp4, mxfp4')
+    parser.add_argument('--quantBWDGogw', default='nq', type=str, help='int, stoch, no, luq, nq, fp4, mxfp4')
+    parser.add_argument('--quantBWDAct', default='sawb', type=str, help='int, stoch, no, sawb, fp4, mxfp4')
 
     parser.add_argument('--vectorPercentile', default=50, type=int)
 
@@ -120,8 +131,29 @@ def get_args_parser():
     
     return parser
 
+def resolve_gemm_mode(parsed_args):
+    '''Resolve realGEMM / fakeGEMM and set FP4/MXFP4 defaults.
+
+    - realGEMM and fakeGEMM are mutually exclusive.
+    - realGEMM (Triton GEMM) is not implemented yet -> hard error (TODO).
+    - fakeGEMM uses explicit per-tensor quant schemes (tensorcast), so the
+      layer-wise auto quantizer selection (LQS) is disabled, and any unset
+      quant scheme defaults to mxfp4.'''
+    assert not (parsed_args.realGEMM and parsed_args.fakeGEMM), \
+        "Enable only one of --realGEMM / --fakeGEMM, not both."
+    if parsed_args.realGEMM:
+        raise NotImplementedError(
+            "realGEMM (Triton low-precision GEMM) is not implemented yet. "
+            "TODO: add the Triton GEMM backward path. "
+            "Use --realGEMM false / --fakeGEMM true for now.")
+    if parsed_args.fakeGEMM:
+        parsed_args.quantAuto = False  # tensorcast path uses explicit schemes, not LQS
+        for attr in ('quantBWDGogi', 'quantBWDWgt', 'quantBWDGogw', 'quantBWDAct'):
+            if getattr(parsed_args, attr) in ('no', False, None):
+                setattr(parsed_args, attr, 'mxfp4')
+
 def allocate_args(parsed_args):
-    for name, _ in vars(parsed_args).items(): 
+    for name, _ in vars(parsed_args).items():
         setattr(args, name, getattr(parsed_args, name))
 
 def allocate_args_for_calibration(parsed_args):
@@ -322,6 +354,13 @@ def main_worker(rank, parsed_args):
     if args.wagSaveForPlot:
         layer_wag_save_init(model)
 
+    use_wandb = args.WANDB and rank == 0
+    if use_wandb:
+        if wandb is None:
+            raise ImportError("--WANDB true but the wandb package is not installed. Run `pip install wandb`.")
+        wandb.init(project=args.WANDB_PROJECT, entity=args.WANDB_ENTITY,
+                   name=args.RUN_NAME, config=vars(parsed_args))
+
     scaler = GradScaler(enabled=True)
     best_acc = 0
     for epoch in range(args.EPOCHS):
@@ -347,6 +386,19 @@ def main_worker(rank, parsed_args):
                         .format(epoch,
                                 train_prec1=train_prec1, val_prec1=val_prec1,
                                 train_loss=train_loss, val_loss=val_loss))
+
+            if use_wandb:
+                wandb.log({
+                    'epoch': epoch,
+                    'lr': optimizer.param_groups[0]['lr'],
+                    'train/loss': train_loss,
+                    'train/prec1': train_prec1,
+                    'train/prec5': train_prec5,
+                    'val/loss': val_loss,
+                    'val/prec1': val_prec1,
+                    'val/prec5': val_prec5,
+                    'val/best_prec1': max(val_prec1, best_acc),
+                }, step=epoch)
 
             if val_prec1 > best_acc and not args.DEBUG_MODE:
                 best_acc = max(val_prec1, best_acc)
@@ -417,7 +469,10 @@ if __name__ == '__main__':
     # args parsing
     parser = argparse.ArgumentParser('HLQ training and evaluation script', parents=[get_args_parser()])
     parsed_args = parser.parse_args()
-    
+
+    # Resolve GEMM backend (realGEMM vs fakeGEMM) and FP4/MXFP4 defaults
+    resolve_gemm_mode(parsed_args)
+
     # seed setting
     seed = parsed_args.SEED
     random.seed(seed)
