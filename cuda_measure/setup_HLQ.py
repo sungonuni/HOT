@@ -3,7 +3,7 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import os
 
 file_path = os.path.dirname(os.getcwd())
-cutlass_path = "cutlass/cutlass/include"
+cutlass_path = "cutlass/include"
 file_path = os.path.join(file_path, cutlass_path)
 
 setup(
