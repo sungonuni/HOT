@@ -160,9 +160,12 @@ def main_worker(rank, parsed_args):
         input_size=(3, 224, 224),
         batch_size=args.BATCH_SIZE,
         optimizer=optimizer,
-        run_name=args.RUN_NAME
+        run_name=args.RUN_NAME+"-FP"
     )
 
+    print("")
+    print("")
+    print("")
     calculator.print_memory_usage()
 
     del calculator
@@ -173,9 +176,10 @@ def main_worker(rank, parsed_args):
         batch_size=args.BATCH_SIZE,
         optimizer=optimizer,
         isHLQ=True,
-        run_name=args.RUN_NAME+"-HLQ"
+        run_name=args.RUN_NAME+"-HOT"
     )
 
+    print("")
     calculator.print_memory_usage()
 
     print("")
@@ -186,7 +190,7 @@ def main_worker(rank, parsed_args):
 
 if __name__ == '__main__':
     # args parsing
-    parser = argparse.ArgumentParser('HLQ training and evaluation script', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('HOT training and evaluation script', parents=[get_args_parser()])
     parsed_args = parser.parse_args()
     
     # seed setting

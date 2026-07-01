@@ -613,20 +613,6 @@ std::tuple<torch::Tensor, torch::Tensor, std::vector<double>> backward_cuda(torc
     clock_t time_low_rank_end = clock();
     cudaDeviceSynchronize();
 
-    printf("===== HLA check =====\n");
-    std::cout << "Gogw_hq: " << Gogw_hq.size(0) << " " << Gogw_hq.size(1) << std::endl;
-    std::cout << "Gogw_hq_lr: " << Gogw_hq_lr.size(0) << " " << Gogw_hq_lr.size(1) << std::endl;
-    std::cout << "X_hq: " << X_hq.size(0) << " " << X_hq.size(1) << std::endl;
-    std::cout << "Xt_hq_lr: " << Xt_hq_lr.size(0) << " " << Xt_hq_lr.size(1) << std::endl;
-    printf("\n");
-
-    printf("===== GEMM tensor shape check =====\n");
-    std::cout << "pack_Gogi: " << pack_Gogi.size(0) << " " << pack_Gogi.size(1) << std::endl;
-    std::cout << "pack_Wt: " << pack_Wt.size(0) << " " << pack_Wt.size(1) << std::endl;
-    std::cout << "Gogw_hq_lr: " << Gogw_hq_lr.size(0) << " " << Gogw_hq_lr.size(1) << std::endl;
-    std::cout << "Xt_hq_lr: " << Xt_hq_lr.size(0) << " " << Xt_hq_lr.size(1) << std::endl;
-    printf("\n");
-
     torch::Tensor pack_Gogi_dummy = torch::zeros({L, pack_O}, option_quantize);
     torch::Tensor pack_Wt_dummy = torch::zeros({I, pack_O}, option_quantize);
     torch::Tensor Gogw_hq_dummy = torch::zeros({L, O}, option_quantize);
@@ -647,13 +633,6 @@ std::tuple<torch::Tensor, torch::Tensor, std::vector<double>> backward_cuda(torc
         Xt_hq_lr_dummy = padding_col(Xt_hq_lr_dummy, low_rank, 8);
         low_rank = Gogw_hq_lr_dummy.size(1);
     }
-
-    printf("===== Padded GEMM tensor shape check =====\n");
-    std::cout << "pack_Gogi_dummy: " << pack_Gogi_dummy.size(0) << " " << pack_Gogi_dummy.size(1) << std::endl;
-    std::cout << "pack_Wt_dummy: " << pack_Wt_dummy.size(0) << " " << pack_Wt_dummy.size(1) << std::endl;
-    std::cout << "Gogw_hq_lr_dummy: " << Gogw_hq_lr_dummy.size(0) << " " << Gogw_hq_lr_dummy.size(1) << std::endl;
-    std::cout << "Xt_hq_lr_dummy: " << Xt_hq_lr_dummy.size(0) << " " << Xt_hq_lr_dummy.size(1) << std::endl;
-    printf("\n");
 
     // gemm for int4 and int8
     clock_t time_gemm_start = clock();
@@ -676,13 +655,6 @@ std::tuple<torch::Tensor, torch::Tensor, std::vector<double>> backward_cuda(torc
     // Final dequantize
     torch::Tensor gx = torch::empty({L, I}, option_dequantize);
     torch::Tensor gw = torch::empty({O, I}, option_dequantize);
-    
-    printf("===== Result tensor shape check ===== \n");
-    std::cout << "gx_gemm: " << gx_gemm.size(0) << " " << gx_gemm.size(1) << std::endl;
-    std::cout << "gx: " << gx.size(0) << " " << gx.size(1) << std::endl;
-    std::cout << "gw_gemm: " << gw_gemm.size(0) << " " << gw_gemm.size(1) << std::endl;
-    std::cout << "gw: " << gw.size(0) << " " << gw.size(1) << std::endl;
-    printf("\n");
 
     cudaDeviceSynchronize();
     clock_t time_dequantize_start = clock();
@@ -720,12 +692,6 @@ std::tuple<torch::Tensor, torch::Tensor, std::vector<double>> backward_cuda(torc
     double gemm_time = (double)(time_gemm_end - time_gemm_start) / CLOCKS_PER_SEC;
     double dequantize_time = (double)(time_dequantize_end - time_dequantize_start) / CLOCKS_PER_SEC;
 
-    std::cout << "fwht_time: " << fwht_time << std::endl;
-    std::cout << "quant_time: " << quant_time << std::endl;
-    std::cout << "low_rank_time: " << low_rank_time << std::endl;
-    std::cout << "gemm_time: " << gemm_time << std::endl;
-    std::cout << "dequantize_time: " << dequantize_time << std::endl;
-  
     std::vector<double> time_vector;
     time_vector.push_back(fwht_time);
     time_vector.push_back(quant_time);
