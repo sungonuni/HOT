@@ -17,7 +17,7 @@
 
 python ViT_main.py \
     --GPU_USE 0 \
-    --RUN_NAME vit_b_cifar100_HOT_giMXFP4_gwINT8 \
+    --RUN_NAME vit_b_cifar100_HOT_giFP4_gwINT4 \
     --DEBUG_MODE false \
     --WANDB true \
     --WANDB_PROJECT Hadamard_Quant \
@@ -34,8 +34,8 @@ python ViT_main.py \
     --realGEMM false \
     --fakeGEMM true \
     --quantAuto false \
-    --quantBWDGogi mxfp4 \
-    --quantBWDWgt mxfp4 \
+    --quantBWDGogi fp4 \
+    --quantBWDWgt fp4 \
     --quantBWDGogw int \
     --quantBWDAct int \
     \
@@ -43,8 +43,8 @@ python ViT_main.py \
     --milestone 50 \
     --GogiQuantBit 4 \
     --weightQuantBit 4 \
-    --GogwQuantBit 8 \
-    --actQuantBit 8 \
+    --GogwQuantBit 4 \
+    --actQuantBit 4 \
     \
     --transform_scheme gih_gwlr \
     --TransformGogi true \

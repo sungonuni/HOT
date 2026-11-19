@@ -50,10 +50,12 @@ class ModelMemoryCalculator:
         
         def hook_fn(name):
             def hook(module, input, output):
+                # Backward saves the layer input X (dW = X^T @ dY), not the output Y.
+                input_numel = input[0].numel()
                 if self.isHLQ:
-                    activation_memory[name] = ((output.numel() // 2) * self.batch_size) if module.weight.requires_grad else 0
+                    activation_memory[name] = ((input_numel // 2) * self.batch_size) if module.weight.requires_grad else 0
                 else:
-                    activation_memory[name] = (output.numel() * self.batch_size * self.bytes_per_element) if module.weight.requires_grad else 0
+                    activation_memory[name] = (input_numel * self.batch_size * self.bytes_per_element) if module.weight.requires_grad else 0
                 if 'qkv' in name:
                     activation_memory[name] *= 4
 
