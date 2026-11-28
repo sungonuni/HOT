@@ -9,3 +9,7 @@ dist
 checkpoint
 tensorcast
 tunnel_history
+*.pt
+*.bin
+*.json
+*.txt
