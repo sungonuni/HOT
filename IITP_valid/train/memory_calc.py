@@ -1,19 +1,9 @@
-"""Step 1 학습 메모리 계산값: SimCLR + ResNet18 학습 1 step 에 써야 하는 메모리.
+"""Step 1 analytic training memory for one SimCLR + ResNet18 step.
 
-  학습 메모리 = 가중치 + gradient + 옵티마이저 상태 + activation
-    가중치          : 파라미터·버퍼 (원소 수 × 4B). 경량 모델은 양자화기 step size 포함
-    gradient        : 파라미터마다 1개 (원소 수 × 4B)
-    옵티마이저 상태 : SGD momentum, 파라미터마다 1개 (원소 수 × 4B)
-    activation      : forward 가 끝난 시점에 backward 를 위해 저장해 둔 텐서 전부 (원소 수 × 원소 바이트)
-                      autograd 가 저장하는 텐서를 saved_tensors_hooks 로 하나씩 받아 저장공간 단위로 중복 없이 더함.
-                      파라미터(가중치)를 가리키는 것은 가중치에 이미 들어 있으므로 뺌.
-  모드
-    fp32           : 원본
-    nipq_hot       : 경량 (NIPQ forward + HOT INT8 backward, NIPQ 는 마스크 1bit + 노이즈 시드만 저장)
-    nipq_hot_naive : 참고. 같은 NIPQ 식을 PyTorch autograd 그대로 계산 (pseudo quantizer 가 메모리를 얼마나 더 쓰는지)
-  배치: CIFAR-10 train 이미지 256장 × 두 view = 512장 (32×32)
+Total = weights + gradients + optimizer state (SGD momentum) + activations saved for backward.
+Saved activations are collected with saved_tensors_hooks, deduplicated by storage, parameters excluded.
 
-    python memory_calc.py --data <CIFAR-10 폴더>
+    python memory_calc.py
 """
 import argparse
 import json
@@ -33,8 +23,7 @@ CALC_MODES = ["fp32", "nipq_hot", "nipq_hot_naive"]
 
 
 def train_model(mode, dev, calib_x=None):
-    """학습 중 상태의 모델 (경량: 양자화기 켜짐, NIPQ 노이즈 켜짐). 사전학습 ckpt 가 있으면 그 값을 쓰고, 없으면 보정 배치로
-    step size 를 초기화한다 (메모리 크기는 값과 무관)."""
+    """Model in training state; loads the pretrain ckpt if present, else calibrates step sizes."""
     m = build_simclr(mode).to(dev)
     ck = pretrain_ckpt(mode.replace("_naive", ""))
     if os.path.exists(ck):
@@ -47,8 +36,7 @@ def train_model(mode, dev, calib_x=None):
 
 
 def saved_activations(model, x):
-    """x 로 forward 1회 + 손실 계산 동안 backward 용으로 저장된 텐서 목록 [(층 종류, dtype, shape, 바이트)].
-    층 종류는 qnet.TAG (저장하는 순간 실행 중인 연산)."""
+    """Tensors saved for backward during one forward + loss: [(layer type, dtype, shape, bytes)]."""
     param_storages = {p.untyped_storage().data_ptr() for p in model.parameters()}
     seen, recs = set(), []
 
@@ -107,18 +95,18 @@ def main():
     json.dump(out, open(os.path.join(a.output_dir, "memory_calc.json"), "w"), indent=1)
     row = lambda k: "".join(f"{out[m][k] / MiB:12.1f}" for m in CALC_MODES)  # noqa: E731
     h = out["nipq_hot"]
-    print(f"학습 메모리 계산값 (MiB, 배치 {x.size(0)}장)     원본 FP32 경량 NIPQ+HOT  (참고) NIPQ 기본 구현+HOT\n"
-          f"  가중치                          {row('weight_bytes')}\n"
-          f"  gradient                        {row('gradient_bytes')}\n"
-          f"  옵티마이저 상태 (momentum)      {row('optimizer_state_bytes')}\n"
-          f"  activation (backward 용 저장)   {row('activation_bytes')}\n"
-          f"  합계                            {row('total_bytes')}\n"
-          f"  경량 NIPQ+HOT 절감 {h['reduction_pct']:.1f}% {'PASS' if h['reduction_pct'] >= TRAIN_TARGET else 'FAIL'}"
-          f" | (참고) NIPQ 기본 구현+HOT 절감 {out['nipq_hot_naive']['reduction_pct']:.1f}%", flush=True)
+    print(f"{f'Train memory calc (MiB, batch {x.size(0)})':32}{'FP32':>12}{'NIPQ+HOT':>12}{'naive+HOT':>12}\n"
+          f"  weights                         {row('weight_bytes')}\n"
+          f"  gradients                       {row('gradient_bytes')}\n"
+          f"  optimizer state (momentum)      {row('optimizer_state_bytes')}\n"
+          f"  activations (saved for bwd)     {row('activation_bytes')}\n"
+          f"  total                           {row('total_bytes')}\n"
+          f"  NIPQ+HOT reduction {h['reduction_pct']:.1f}% {'PASS' if h['reduction_pct'] >= TRAIN_TARGET else 'FAIL'}"
+          f" | (ref) naive NIPQ+HOT reduction {out['nipq_hot_naive']['reduction_pct']:.1f}%", flush=True)
     for mode in CALC_MODES:
-        print(f"  [{MODE_EN[mode]}] activation 층 종류별 (MiB): "
+        print(f"  [{MODE_EN[mode]}] activations by layer type (MiB): "
               + ", ".join(f"{k} {v / MiB:.1f}" for k, v in out[mode]["activation_by_layer_type"].items())
-              + " | dtype별: " + ", ".join(f"{k} {v / MiB:.1f}" for k, v in out[mode]["activation_by_dtype"].items()))
+              + " | by dtype: " + ", ".join(f"{k} {v / MiB:.1f}" for k, v in out[mode]["activation_by_dtype"].items()))
 
 
 if __name__ == "__main__":

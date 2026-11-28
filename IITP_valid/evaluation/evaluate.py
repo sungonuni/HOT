@@ -1,11 +1,7 @@
-"""Step 2 정확도: CIFAR-10 test 10,000장 top-1.
+"""Step 2 accuracy: CIFAR-10 test top-1 (fp32 checkpoint or packed W4A4 .bin).
 
-  --mode fp32 : 원본 FP32 모델 (models/simclr_resnet18_fp32.pt)
-  --mode w4a4 : 배포 파일 models/simclr_resnet18_w4a4.bin 만으로 실행
-                (runtime_packed.py: 가중치·activation 을 4bit 정수 비트열로 두고 실행)
-
-    python evaluate.py --mode fp32 --data <CIFAR-10 폴더>
-    python evaluate.py --mode w4a4 --data <CIFAR-10 폴더>
+    python evaluate.py --mode fp32
+    python evaluate.py --mode w4a4
 """
 import argparse
 import json
@@ -27,9 +23,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--mode", required=True, choices=["fp32", "w4a4"])
     p.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--data", default=None, help="CIFAR-10 폴더 (없으면 IITP_valid/data 에 자동 다운로드)")
-    p.add_argument("--chunk", type=int, default=16, help="경량 모델 런타임: 채널 몇 개씩 복원 (0 = 층 전체)")
-    p.add_argument("--dtype", default="fp32", choices=["fp32", "bf16"], help="경량 모델 런타임: 복원 정밀도")
+    p.add_argument("--data", default=None, help="CIFAR-10 dir (downloaded to IITP_valid/data if missing)")
+    p.add_argument("--chunk", type=int, default=16, help="W4A4 runtime: channels dequantized per chunk (0 = whole layer)")
+    p.add_argument("--dtype", default="fp32", choices=["fp32", "bf16"], help="W4A4 runtime: dequantization dtype")
     p.add_argument("--output-dir", default=RESULTS)
     a = p.parse_args()
     os.makedirs(a.output_dir, exist_ok=True)
@@ -49,8 +45,8 @@ def main():
         r["runtime"] = {"chunk": a.chunk or "layer", "dtype": a.dtype}
     r["acc"] = (pred == yte).float().mean().item() * 100
     r["seconds"] = time.time() - t0
-    name = "원본 FP32" if a.mode == "fp32" else QLABEL + " (배포 파일로 실행)"
-    print(f"[{TITLE}] {name} 정확도 {r['acc']:.2f}% ({r['n_test']:,}장)", flush=True)
+    name = "original FP32" if a.mode == "fp32" else QLABEL + " (run from .bin)"
+    print(f"[{TITLE}] {name} accuracy {r['acc']:.2f}% ({r['n_test']:,} images)", flush=True)
     json.dump(r, open(os.path.join(a.output_dir, f"{a.mode}_acc.json"), "w"), indent=1, ensure_ascii=False)
 
 

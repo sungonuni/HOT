@@ -1,12 +1,4 @@
-"""Step 2 모델 확인 (Step 1 이 만든 models/ 의 파일만 사용).
-
- 1. 구조   : 원본 models/simclr_resnet18_fp32.pt 가 torchvision ResNet18 (CIFAR stem, 10 클래스) 과 같은지
-             (파라미터 수, 층 모양, 같은 가중치에서 출력 일치)
- 2. 배포 파일 models/simclr_resnet18_w4a4.bin
-    - 파일 크기 = 모델 구조와 비트수로 계산한 가중치 메모리 (가중치 수 × 비트/8 + 채널별 scale·bias + activation scale)
-    - 모델 구조 순서대로 읽었을 때 남거나 모자라는 바이트가 없는지
-    - 가중치가 모두 4bit 정수 격자 위인지 ([-7, 7]) × 채널별 scale, activation 양자화기가 모두 4bit 인지
-    - 읽은 모델을 다시 저장하면 원래 파일과 바이트 단위로 같은지
+"""Step 2 model check: FP32 model matches torchvision ResNet18; W4A4 .bin size, bit widths and round-trip.
 
     python check_model.py
 """
@@ -26,7 +18,7 @@ from core.qnet import LSQ, FusedConv, QLinear, weight_bytes
 
 
 def torchvision_model():
-    """torchvision ResNet18 + CIFAR(32×32) stem + 10 클래스 분류기."""
+    """torchvision ResNet18 with CIFAR stem, 10 classes."""
     m = torchvision.models.resnet18(weights=None, num_classes=10)
     m.conv1, m.maxpool = nn.Conv2d(3, 64, 3, 1, 1, bias=False), nn.Identity()
     return m.eval()
@@ -37,7 +29,7 @@ def check_structure():
     fp32, tv = load_fp32().double(), torchvision_model().double()
     a, b = list(fp32.state_dict().items()), list(tv.state_dict().items())
     same_shapes = len(a) == len(b) and all(va.shape == vb.shape for (_, va), (_, vb) in zip(a, b))
-    tv.load_state_dict({kb: va for (_, va), (kb, _) in zip(a, b)})  # 같은 학습 가중치를 torchvision 모델에 넣음
+    tv.load_state_dict({kb: va for (_, va), (kb, _) in zip(a, b)})
     x = torch.randn(4, 3, 32, 32, dtype=torch.float64)
     o1, o2 = fp32(x), tv(x)
     return {"params_ours": sum(p.numel() for p in fp32.parameters()),
@@ -70,7 +62,7 @@ def check_quant():
     path = W4A4_MODEL
     size = os.path.getsize(path)
     calc = weight_bytes(deploy_w4a4())
-    q = import_packed(deploy_w4a4(), path)  # 크기가 안 맞으면 여기서 오류
+    q = import_packed(deploy_w4a4(), path)  # raises on size mismatch
     ck = check_bits(q)
     with tempfile.TemporaryDirectory() as tmp:
         again = os.path.join(tmp, "again.bin")
@@ -80,11 +72,11 @@ def check_quant():
           "size_match": size == calc, "resave_identical": same}
     ok = (ck["weight_bits_used"] == [W_BITS] and ck["act_bits_used"] == [A_BITS] and ck["weights_off_grid"] == 0
           and pf["size_match"] and same)
-    print(f"  [{QLABEL}] 파일 models/{pf['file']}: {size:,} bytes, 구조·비트수로 계산한 가중치 메모리 {calc:,} bytes "
-          f"(일치 {pf['size_match']})\n"
-          f"         가중치 양자화기 {ck['n_weight_quantizers']}개 {ck['weight_bits_used']}bit (정수 범위 "
-          f"{ck['weight_int_range']}), activation 양자화기 {ck['n_act_quantizers']}개 {ck['act_bits_used']}bit, "
-          f"가중치 {ck['n_weights']:,}개 중 정수 격자 밖 {ck['weights_off_grid']}개, 다시 저장한 파일과 같음 {same}"
+    print(f"  [{QLABEL}] file models/{pf['file']}: {size:,} bytes, weight memory from shapes/bits {calc:,} bytes "
+          f"(match {pf['size_match']})\n"
+          f"         {ck['n_weight_quantizers']} weight quantizers {ck['weight_bits_used']}bit (int range "
+          f"{ck['weight_int_range']}), {ck['n_act_quantizers']} activation quantizers {ck['act_bits_used']}bit, "
+          f"{ck['weights_off_grid']} of {ck['n_weights']:,} weights off the int grid, re-export identical {same}"
           f"  → {'OK' if ok else 'FAIL'}", flush=True)
     return {"bits": ck, "packed_file": pf, "ok": ok}
 
@@ -98,8 +90,8 @@ def main():
     st_ok = (st["params_ours"] == st["params_torchvision"] and st["same_layer_shapes"]
              and st["max_rel_output_diff"] < 1e-9)
     print(f"[{TITLE}]\n"
-          f"  구조: torchvision 과 파라미터 {st['params_ours']:,} vs {st['params_torchvision']:,}, 층 모양 일치 "
-          f"{st['same_layer_shapes']}, 같은 가중치에서 출력 상대오차 {st['max_rel_output_diff']:.1e}  "
+          f"  structure: params {st['params_ours']:,} vs torchvision {st['params_torchvision']:,}, same layer shapes "
+          f"{st['same_layer_shapes']}, output rel. error with same weights {st['max_rel_output_diff']:.1e}  "
           f"→ {'OK' if st_ok else 'FAIL'}", flush=True)
     r = {"model": TITLE, "structure": st, "structure_ok": st_ok, "quant": check_quant()}
     r["ok"] = st_ok and r["quant"]["ok"]

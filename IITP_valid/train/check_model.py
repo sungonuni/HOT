@@ -1,21 +1,12 @@
-"""Step 1 모델 확인 (ckpt/ 의 사전학습 결과 사용).
+"""Step 1 model check (uses the pretrain ckpts).
 
- 1. 구조       : 원본 FP32 와 경량 NIPQ+HOT 이 같은 SimCLR + ResNet18 인지
-                 - 백본이 torchvision ResNet18 (CIFAR stem: conv1 3×3/s1, maxpool 제거, 분류기 제거) 과 같은지:
-                   파라미터 수·층 모양, 같은 가중치를 넣었을 때 출력이 같은지
-                 - 두 모델의 파라미터가 같은지 (경량 모델에는 양자화기 step size 만 더 있음),
-                   두 ckpt 가 같은 설정으로 마지막 에폭까지 학습됐는지
- 2. 경량 레이어 : 모든 conv·linear 의 가중치와 모든 activation 에 4bit 양자화기가 붙었는지,
-                 모든 conv·linear·BN·ReLU 가 HOT backward 를 쓰는지
- 3. 저장 텐서   : 학습 forward 에서 backward 용으로 저장한 텐서의 dtype (saved_tensors_hooks).
-                 경량 모델은 activation 을 INT8·1bit 로만 저장하고, FP32 로 저장하는 것은 scale·통계(채널·표본당 1개)와
-                 양자화된 가중치 사본(가중치 크기)뿐인지
- 4. HOT 변환 정확성 : HOT 의 INT8 양자화를 끄고 Hadamard 변환만 하면 기울기가 정확한지. FP64 로 계산한 기울기 기준,
-                 HOT(양자화 끔) 의 상대 오차가 FP32 자체의 반올림 오차의 2배 이내인지
- 5. NIPQ 구현 정확성 : 메모리를 줄인 NIPQ 구현(마스크 1bit + 노이즈 다시 생성)이 PyTorch autograd 그대로의 NIPQ 와
-                 같은 노이즈에서 같은 출력·기울기(양자화기 step size 포함)를 내는지
+ 1. structure: same SimCLR + ResNet18 as torchvision (CIFAR stem), same parameters and train settings
+ 2. layers: 4-bit quantizers on all weights/activations, HOT backward on all layers
+ 3. saved tensors: no FP32 activations saved for backward in the NIPQ+HOT model
+ 4. HOT exactness: Hadamard-only HOT gradient error <= 2x FP32 rounding error (FP64 reference)
+ 5. NIPQ exactness: memory-efficient NIPQ matches plain-autograd NIPQ
 
-    python check_model.py --data <CIFAR-10 폴더>
+    python check_model.py
 """
 import argparse
 import copy
@@ -35,8 +26,8 @@ from core.model import build_simclr, nt_xent  # noqa: E402
 from memory_calc import saved_activations  # noqa: E402
 
 RESULTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results")
-EXACT_FACTOR = 2.0   # 4: HOT(양자화 끔) 오차 ≤ 2 × FP32 반올림 오차
-NIPQ_TOL = 1e-4      # 5: 두 NIPQ 구현의 기울기 최대 상대 오차 (합 순서 차이만 남음)
+EXACT_FACTOR = 2.0
+NIPQ_TOL = 1e-4
 
 
 def torchvision_resnet18():
@@ -62,7 +53,7 @@ def check_structure(models, ckpts, dev):
     tv = torchvision_resnet18().to(dev).double().eval()
     a, b = list(f.backbone.state_dict().items()), list(tv.state_dict().items())
     same_shapes = len(a) == len(b) and all(va.shape == vb.shape for (_, va), (_, vb) in zip(a, b))
-    tv.load_state_dict({kb: va for (_, va), (kb, _) in zip(a, b)})  # 같은 학습 가중치를 torchvision 모델에 넣음
+    tv.load_state_dict({kb: va for (_, va), (kb, _) in zip(a, b)})
     x = torch.randn(8, 3, 32, 32, device=dev, dtype=torch.float64)
     bb = copy.deepcopy(f).double().eval()
     o1, o2 = bb.features(x), tv(x)
@@ -107,8 +98,7 @@ def check_layers(h):
 
 
 def check_saved(models, x):
-    """FP32 로 저장한 텐서 중 원소 수가 배치(512)보다 많고 모양이 가중치와 다른 것 = FP32 activation.
-    scale·BN 통계는 표본·채널당 1개라 해당 없음. 모델 밖 손실(NT-Xent)이 저장하는 텐서는 층 종류 "Loss" 로 따로 둔다."""
+    """FP32 activation = float saved tensor larger than the batch and not weight-shaped (loss excluded)."""
     r = {}
     for mode, m in models.items():
         wshapes = {tuple(p.shape) for p in m.parameters()}
@@ -136,7 +126,6 @@ def max_rel(g, ref):
 
 
 def check_hot(f, x):
-    """같은 가중치·같은 입력에서 기울기 비교. 기준: FP64 로 계산한 원본 모델 기울기."""
     f = copy.deepcopy(f).train()
     buf = {k: v.clone() for k, v in f.state_dict().items()}
     _, g64 = grads(copy.deepcopy(f).double(), x.double())
@@ -155,7 +144,6 @@ def check_hot(f, x):
 
 
 def check_nipq(h, x):
-    """같은 가중치·같은 노이즈(같은 시드)에서 메모리 절감 NIPQ 와 autograd 그대로의 NIPQ 비교 (HOT 은 둘 다 켬)."""
     buf = {k: v.clone() for k, v in h.state_dict().items()}
     res = {}
     qnet.LSQ.noise = True
@@ -208,22 +196,22 @@ def main():
     s, l, sv, g, q = r["structure"], r["layers"], r["saved_tensors"], r["hot_exactness"], r["nipq_exactness"]
     ok = lambda v: "OK" if v else "FAIL"  # noqa: E731
     mb = lambda d: {k: round(v / 2 ** 20, 1) for k, v in d.items()}  # noqa: E731
-    print(f"1. 구조            {ok(s['ok'])}: 파라미터 {s['params_fp32']:,} (경량 {s['params_nipq_hot']:,} + 양자화기 step size "
-          f"{s['quantizer_step_sizes_nipq_hot']:,}), 백본 torchvision ResNet18 과 같음 "
-          f"{s['backbone_same_layer_shapes_as_torchvision']} (출력 차 {s['max_rel_output_diff_vs_torchvision']:.1e}), "
-          f"학습 에폭 {s['epochs']}\n"
-          f"2. 경량 레이어     {ok(l['ok'])}: conv {l['n_conv']}·linear {l['n_linear']}·BN {l['n_bn']}, 가중치 양자화기 "
-          f"{l['n_weight_quantizers']}개 {l['weight_bits']}bit, activation 양자화기 {l['n_act_quantizers']}개 "
-          f"{l['act_bits']}bit, HOT backward 층 {l['n_hot_layers']}개 모두 켜짐 {l['all_hot']}\n"
-          f"3. 저장 텐서       {ok(sv['ok'])}: 원본 {mb(sv['fp32']['bytes_by_dtype'])} / 경량 "
-          f"{mb(sv['nipq_hot']['bytes_by_dtype'])} (MiB), 경량에서 FP32 activation 을 저장한 층 "
-          f"{len(sv['nipq_hot']['layers_saving_float_activation'])}개\n"
-          f"4. HOT 변환 정확성 {ok(g['ok'])}: FP64 기준 최대 상대 오차 — HOT(양자화 끔) "
-          f"{g['hadamard_only_max_rel_err']:.1e}, 원본 FP32 {g['fp32_max_rel_err']:.1e}\n"
-          f"5. NIPQ 구현 정확성 {ok(q['ok'])}: autograd 그대로의 NIPQ 와 forward 출력 같음 {q['same_forward_output']}, "
-          f"기울기 최대 상대 오차 가중치 {q['max_rel_err_weights']:.1e} / step size {q['max_rel_err_step_sizes']:.1e} "
-          f"({q['n_step_size_grads']}개)\n"
-          f"모델 확인: {ok(r['ok'])}", flush=True)
+    print(f"1. structure      {ok(s['ok'])}: params {s['params_fp32']:,} (NIPQ+HOT {s['params_nipq_hot']:,} + quantizer step sizes "
+          f"{s['quantizer_step_sizes_nipq_hot']:,}), backbone matches torchvision ResNet18 "
+          f"{s['backbone_same_layer_shapes_as_torchvision']} (output diff {s['max_rel_output_diff_vs_torchvision']:.1e}), "
+          f"epochs {s['epochs']}\n"
+          f"2. quant layers   {ok(l['ok'])}: conv {l['n_conv']}, linear {l['n_linear']}, BN {l['n_bn']}, weight quantizers "
+          f"{l['n_weight_quantizers']} x {l['weight_bits']}bit, activation quantizers {l['n_act_quantizers']} x "
+          f"{l['act_bits']}bit, HOT backward layers {l['n_hot_layers']} all on {l['all_hot']}\n"
+          f"3. saved tensors  {ok(sv['ok'])}: FP32 {mb(sv['fp32']['bytes_by_dtype'])} / NIPQ+HOT "
+          f"{mb(sv['nipq_hot']['bytes_by_dtype'])} (MiB), NIPQ+HOT layers saving FP32 activations "
+          f"{len(sv['nipq_hot']['layers_saving_float_activation'])}\n"
+          f"4. HOT accuracy   {ok(g['ok'])}: max rel. error vs FP64 - HOT (no quant) "
+          f"{g['hadamard_only_max_rel_err']:.1e}, FP32 {g['fp32_max_rel_err']:.1e}\n"
+          f"5. NIPQ accuracy  {ok(q['ok'])}: same forward as plain-autograd NIPQ {q['same_forward_output']}, "
+          f"max rel. grad error weights {q['max_rel_err_weights']:.1e} / step sizes {q['max_rel_err_step_sizes']:.1e} "
+          f"({q['n_step_size_grads']})\n"
+          f"Model check: {ok(r['ok'])}", flush=True)
 
 
 if __name__ == "__main__":

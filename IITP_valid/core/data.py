@@ -1,4 +1,4 @@
-"""CIFAR-10 로딩, 증강(GPU, 배치 단위), 라벨 부분집합, 정확도."""
+"""CIFAR-10 loading, GPU augmentation, label subsets, accuracy."""
 import math
 import os
 import pickle
@@ -33,12 +33,11 @@ def _from_py(d):
 
 
 def load_cifar10(device, root=None):
-    """CIFAR-10 (uint8). root 에서 binary(cifar-10-batches-bin) 또는 python(cifar-10-batches-py) 버전을 찾고,
-    없으면 torchvision 으로 root 에 내려받는다."""
+    """Load CIFAR-10 as uint8 tensors; download via torchvision if not found under root."""
     root = root or os.path.join(ROOT, "data")
     os.makedirs(root, exist_ok=True)
     import fcntl
-    with open(os.path.join(root, ".download.lock"), "w") as lk:  # 여러 프로세스가 동시에 내려받지 않도록
+    with open(os.path.join(root, ".download.lock"), "w") as lk:  # serialize concurrent downloads
         fcntl.flock(lk, fcntl.LOCK_EX)
         for sub, fn in [("cifar-10-batches-bin", _from_bin), ("cifar-10-batches-py", _from_py)]:
             if os.path.isdir(os.path.join(root, sub)):
@@ -52,7 +51,7 @@ def load_cifar10(device, root=None):
 
 
 def label_subset(y, frac, seed=0, classes=10):
-    """클래스마다 같은 비율로 뽑은 train 인덱스 (frac=0.1 → 클래스별 500장, 총 5,000장). 시드 고정."""
+    """Class-balanced random subset of train indices (seeded)."""
     if frac >= 1:
         return torch.arange(y.numel(), device=y.device)
     g = torch.Generator().manual_seed(seed)
@@ -73,9 +72,9 @@ def to_input(x_uint8):
 
 
 def augment(x_uint8):
-    """지도학습(fine-tuning) 증강: 4px 패딩 후 랜덤 32x32 crop + 좌우 반전."""
+    """Pad-4 random crop + horizontal flip."""
     n, dev = x_uint8.size(0), x_uint8.device
-    x = F.pad(to_input(x_uint8), (4, 4, 4, 4))  # (n,3,40,40)
+    x = F.pad(to_input(x_uint8), (4, 4, 4, 4))
     i = torch.randint(0, 9, (n, 1, 1, 1), device=dev)
     j = torch.randint(0, 9, (n, 1, 1, 1), device=dev)
     ar = torch.arange(32, device=dev)
@@ -91,13 +90,11 @@ def _gray(x):
 
 
 def simclr_view(x_uint8, min_scale=0.2):
-    """SimCLR 증강 한 view (이미지마다 다른 난수):
-    RandomResizedCrop(32, scale=(0.2, 1), ratio=(3/4, 4/3)) → 좌우 반전(p=0.5)
-    → ColorJitter(0.4, 0.4, 0.4, 0.1)(p=0.8) → Grayscale(p=0.2) → 정규화."""
+    """One SimCLR view: RandomResizedCrop(0.2-1) + flip, ColorJitter(0.4, 0.4, 0.4, 0.1) p=0.8, Grayscale p=0.2."""
     n, dev = x_uint8.size(0), x_uint8.device
     x = x_uint8.float() / 255.0
     u = lambda lo, hi, *s: torch.empty(n, *s, device=dev).uniform_(lo, hi)  # noqa: E731
-    # RandomResizedCrop + flip: 이미지마다 affine 격자로 잘라 32×32 로 bilinear 보간
+    # RandomResizedCrop + flip via per-image affine grid
     area = u(min_scale, 1.0)
     logr = u(math.log(3 / 4), math.log(4 / 3))
     w = torch.sqrt(area * torch.exp(logr)).clamp(max=1.0)
@@ -108,14 +105,14 @@ def simclr_view(x_uint8, min_scale=0.2):
     theta[:, 0, 0], theta[:, 0, 2], theta[:, 1, 1], theta[:, 1, 2] = w * flip, cx, h, cy
     grid = F.affine_grid(theta, (n, 3, 32, 32), align_corners=False)
     x = F.grid_sample(x, grid, mode="bilinear", padding_mode="reflection", align_corners=False)
-    # ColorJitter (밝기 → 대비 → 채도 → 색조), p=0.8
+    # ColorJitter: brightness, contrast, saturation, hue
     jit = (torch.rand(n, 1, 1, 1, device=dev) < 0.8).float()
     y = x * u(0.6, 1.4, 1, 1, 1)
     y = (y - _gray(y).mean((2, 3), keepdim=True)) * u(0.6, 1.4, 1, 1, 1) + _gray(y).mean((2, 3), keepdim=True)
     y = y.clamp(0, 1)
     g = _gray(y)
     y = ((y - g) * u(0.6, 1.4, 1, 1, 1) + g).clamp(0, 1)
-    # 색조: YIQ 공간에서 IQ 평면을 회전 (hue ±0.1 → ±36°)
+    # hue: rotate the IQ plane in YIQ space
     ang = u(-0.1, 0.1) * 2 * math.pi
     yiq = torch.tensor([[0.299, 0.587, 0.114], [0.596, -0.274, -0.322], [0.211, -0.523, 0.312]], device=dev)
     c = torch.einsum("ij,njhw->nihw", yiq, y)
@@ -123,7 +120,6 @@ def simclr_view(x_uint8, min_scale=0.2):
     i2, q2 = c[:, 1] * cos - c[:, 2] * sin, c[:, 1] * sin + c[:, 2] * cos
     y = torch.einsum("ij,njhw->nihw", torch.linalg.inv(yiq), torch.stack([c[:, 0], i2, q2], 1)).clamp(0, 1)
     x = jit * y + (1 - jit) * x
-    # Grayscale, p=0.2
     gr = (torch.rand(n, 1, 1, 1, device=dev) < 0.2).float()
     x = gr * _gray(x).expand(-1, 3, -1, -1) + (1 - gr) * x
     return normalize(x)

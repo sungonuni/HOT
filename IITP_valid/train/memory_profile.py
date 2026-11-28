@@ -1,22 +1,9 @@
-"""Step 1 실제 GPU 학습 메모리 측정 (학습 1 step) + PyTorch 메모리 타임라인 그림 (torch.profiler).
-모드마다 별도 프로세스로 실행하고, 그림은 같은 Y 축으로 위아래 합친다.
-  fp32           : 원본 FP32
-  nipq_hot       : 경량 NIPQ forward + HOT INT8 backward (판정 대상)
-  nipq_hot_naive : 참고. NIPQ 를 PyTorch autograd 그대로 계산 (pseudo quantizer 메모리 최적화 전)
+"""Step 1 measured GPU training memory (one step) and memory timeline plot.
 
-학습 1 step = model.train_step (학습 코드와 같은 함수): 두 view 증강 → forward → NT-Xent → backward → SGD step.
-배치는 CIFAR-10 train 이미지 256장 (두 view 512장). 예열 3 step 후 1 step 을 기록한다.
+Each mode runs in its own process; --combine stacks the plots on a shared Y axis.
+peak_training_tensors excludes the transient cuDNN conv workspace; peak_allocated includes it.
 
-측정값
-  - peak_training_tensors : 학습 1 step 중 GPU 텐서 메모리 피크 (가중치 + gradient + 옵티마이저 상태 + activation
-                            + 증강·backward 임시 버퍼). CUDA 메모리 할당 기록을 시간순으로 다시 더해서 구하고,
-                            cuDNN 이 conv 알고리즘용으로 잠깐 잡는 작업공간은 뺀다.
-  - peak_allocated        : 위 값에 cuDNN 작업공간까지 포함한 값 (torch.cuda.max_memory_allocated)
-  cuBLAS 작업공간은 CUBLAS_WORKSPACE_CONFIG=:0:0 으로 끈다. TF32 는 끈다.
-
-    python memory_profile.py --mode fp32           --data <CIFAR-10 폴더>
-    python memory_profile.py --mode nipq_hot       --data <CIFAR-10 폴더>
-    python memory_profile.py --mode nipq_hot_naive --data <CIFAR-10 폴더>
+    python memory_profile.py --mode fp32|nipq_hot|nipq_hot_naive
     python memory_profile.py --combine
 """
 import argparse
@@ -29,7 +16,7 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":0:0")
 import tempfile  # noqa: E402
 
 _ntf = tempfile.NamedTemporaryFile
-# PyTorch export_memory_timeline(html) 버그 우회: 임시 PNG 를 "wb" 로 열고 다시 읽음 → "w+b" 로 열게 함 (그림 내용 무관)
+# Workaround: export_memory_timeline(html) opens a temp PNG with "wb" and then reads it back.
 tempfile.NamedTemporaryFile = lambda mode="w+b", *a, **k: _ntf("w+b" if mode == "wb" else mode, *a, **k)
 import matplotlib  # noqa: E402
 
@@ -48,11 +35,11 @@ YLIM_MIB = 7000
 
 
 def replay_peak(snapshot, device_index):
-    """할당 기록을 시간순으로 다시 더함: (전체 피크, cuDNN 작업공간 제외 피크, 동시에 잡힌 cuDNN 작업공간 최대)."""
+    """Replay allocations: (peak, peak without cuDNN workspace, peak cuDNN workspace)."""
     ws, cur_all, cur_model, cur_ws, pk_all, pk_model, pk_ws = set(), 0, 0, 0, 0, 0, 0
     for e in snapshot["device_traces"][device_index]:
         if e["action"] == "alloc":
-            # cuDNN 작업공간은 run_conv_plan 안에서만 잡힌다 (conv 출력·BN 저장 텐서는 cudnn_convolution·cudnn_batch_norm 에서 잡힘)
+            # cuDNN workspace is allocated only inside run_conv_plan
             is_ws = any("run_conv_plan" in f["name"] for f in e["frames"])
             cur_all += e["size"]
             if is_ws:
@@ -78,12 +65,12 @@ def capture(a):
     torch.manual_seed(0)
     dev = torch.device(a.device)
     torch.cuda.set_device(dev)
-    xtr, *_ = load_cifar10("cpu", a.data)  # 데이터셋은 CPU 에 두고 배치만 GPU 로 올림
+    xtr, *_ = load_cifar10("cpu", a.data)
     xb = xtr[:BATCH].to(dev)
     model = train_model(a.mode, dev, to_input(xb))
     opt = make_optimizer(model, lr=1e-3)
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
-    for _ in range(3):  # 예열: momentum 버퍼 생성, cuDNN 핸들·알고리즘 선택
+    for _ in range(3):  # warmup
         train_step(model, opt, xb)
     torch.cuda.synchronize(dev)
     torch.cuda.reset_peak_memory_stats(dev)
@@ -96,24 +83,23 @@ def capture(a):
     peak = torch.cuda.max_memory_allocated(dev)
     pk_all, pk_model, pk_ws = replay_peak(snap, idx)
     n_par = sum(p.numel() for p in model.parameters())
-    # PyTorch 메모리 타임라인 (그림용, 별도 실행 1회)
     with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True,
                  profile_memory=True, with_stack=True) as prof:
         train_step(model, opt, xb)
         torch.cuda.synchronize(dev)
     out = a.output_dir
-    with tempfile.TemporaryDirectory() as tmp:  # PyTorch 출력(html·원시 json)은 그림에만 쓰고 버림
-        prof.export_memory_timeline(os.path.join(tmp, "timeline.html"), device=str(dev))  # 그림을 그림
+    with tempfile.TemporaryDirectory() as tmp:
+        prof.export_memory_timeline(os.path.join(tmp, "timeline.html"), device=str(dev))
         fig = plt.gcf()
         prof.mem_tl.export_memory_timeline(os.path.join(tmp, "timeline.json"), str(dev))
         _, sizes = json.load(open(os.path.join(tmp, "timeline.json")))
     tl_peak = max(map(sum, sizes))
-    assert tl_peak <= YLIM_MIB * MiB, "그림 Y 축 범위를 넘음"
+    assert tl_peak <= YLIM_MIB * MiB, "timeline exceeds plot Y range"
     ax = fig.axes[0]
-    ax.set_ylim(0, YLIM_MIB / 1024)  # PyTorch 그림 단위는 GiB → 눈금만 MiB 로 표시
+    ax.set_ylim(0, YLIM_MIB / 1024)  # plot is in GiB; ticks shown in MiB
     ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v * 1024:.0f}"))
     ax.set_ylabel("PyTorch tensor memory (MiB)")
-    ax.set_title("")  # PyTorch 기본 제목 (Max memory allocated/reserved) 은 지우고 아래 제목만 씀
+    ax.set_title("")
     ax.set_title(f"SimCLR ResNet18 | {MODE_EN[a.mode]} | 1 training step (batch {BATCH}x2 views)\n"
                  f"peak {tl_peak / MiB:.1f} MiB (without cuDNN workspace {(before + pk_model) / MiB:.1f} MiB)",
                  loc="left")
@@ -128,13 +114,13 @@ def capture(a):
          "gpu": torch.cuda.get_device_name(dev), "torch": torch.__version__}
     json.dump(r, open(os.path.join(out, f"{a.mode}_memory.json"), "w"), indent=1, ensure_ascii=False)
     print(f"[SimCLR ResNet18] {MODE_EN[a.mode]}\n"
-          f"  step 시작 전 상주 {before / MiB:.1f} MiB | 학습 1 step 피크 {(before + pk_model) / MiB:.1f} MiB "
-          f"(cuDNN 작업공간 제외) | max_memory_allocated {peak / MiB:.1f} MiB", flush=True)
+          f"  resident before step {before / MiB:.1f} MiB | 1-step training peak {(before + pk_model) / MiB:.1f} MiB "
+          f"(excl. cuDNN workspace) | max_memory_allocated {peak / MiB:.1f} MiB", flush=True)
 
 
 def combine(a):
     meta = [json.load(open(os.path.join(a.output_dir, f"{m}_memory.json"))) for m in CALC_MODES]
-    assert all(m["gpu"] == meta[0]["gpu"] and m["batch"] == meta[0]["batch"] for m in meta), "측정 조건 불일치"
+    assert all(m["gpu"] == meta[0]["gpu"] and m["batch"] == meta[0]["batch"] for m in meta), "measurement settings differ"
     fig, axes = plt.subplots(len(CALC_MODES), 1, figsize=(14, 4 * len(CALC_MODES)), layout="constrained")
     for ax, m in zip(axes, CALC_MODES):
         ax.imshow(plt.imread(os.path.join(a.output_dir, f"{m}_memory.png")))
@@ -142,7 +128,7 @@ def combine(a):
     png = os.path.join(a.output_dir, f"{NAME}_train_memory_comparison.png")
     fig.savefig(png, dpi=130, bbox_inches="tight")
     plt.close(fig)
-    print(f"그림: 위에서부터 {', '.join(MODE_EN[m] for m in CALC_MODES)} (같은 Y 축) → {png}", flush=True)
+    print(f"figure, top to bottom: {', '.join(MODE_EN[m] for m in CALC_MODES)} (shared Y axis) -> {png}", flush=True)
 
 
 def main():

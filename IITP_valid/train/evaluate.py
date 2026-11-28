@@ -1,10 +1,6 @@
-"""Step 1 정확도: CIFAR-10 test 10,000장 top-1 (test set 은 학습·모델 선택에 쓰지 않음, 마지막 에폭 모델).
+"""Step 1 accuracy: CIFAR-10 test top-1 of the fine-tuned FP32 and W4A4 models.
 
-  fp32     : 원본. SimCLR FP32 사전학습 → FP32 fine-tuning (라벨 10%)        models/simclr_resnet18_fp32.pt
-  nipq_hot : 경량. SimCLR NIPQ+HOT 사전학습 → NIPQ+HOT fine-tuning (라벨 10%) ckpt/simclr_resnet18_finetune_nipq_hot.pt
-             (배포 형태: BN 을 합친 W4A4 모델, 실제 반올림. Step 2 는 같은 모델을 배포 파일 .bin 만으로 다시 잰다)
-
-    python evaluate.py --data <CIFAR-10 폴더>
+    python evaluate.py
 """
 import argparse
 import json
@@ -41,7 +37,7 @@ def main():
         r[k] = {"acc": accuracy(m.to(dev), xte, yte), "n_labeled": ck["n_labeled"], "init": ck["init"],
                 "epochs": ck["args"]["epochs"], "label_frac": ck["args"]["frac"], "label_seed": ck["args"]["seed"],
                 "file": os.path.relpath(path, ROOT)}
-        print(f"[{k}] 라벨 {ck['n_labeled']:,}장 → test 정확도 {r[k]['acc']:.2f}%", flush=True)
+        print(f"[{k}] {ck['n_labeled']:,} labels -> test accuracy {r[k]['acc']:.2f}%", flush=True)
     r["same_finetune_labels"] = all(r["fp32"][k] == r["nipq_hot"][k] for k in ["label_frac", "label_seed", "epochs"])
     json.dump(r, open(os.path.join(a.output_dir, "acc.json"), "w"), indent=1, ensure_ascii=False)
 

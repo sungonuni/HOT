@@ -1,16 +1,6 @@
-"""Step 1 학습 평가 전체 실행: 모델 확인 → 학습 메모리 계산 → 정확도 → 실제 학습 메모리 측정·그림 → 판정.
-경량 NIPQ+HOT 으로 학습한 SimCLR + ResNet18 을 원본 FP32 로 학습한 SimCLR + ResNet18 과 비교한다.
+"""Step 1 training evaluation: model check, memory calc, accuracy, measured memory, verdict.
 
-    python run_all.py --device cuda:0 --data <CIFAR-10 폴더>
-
-입력 (pretrain_simclr.py, finetune.py 로 만든다)
-  ckpt/simclr_resnet18_pretrain_{fp32,nipq_hot}.pt    SimCLR 사전학습
-  models/simclr_resnet18_fp32.pt                       원본 fine-tuning 결과
-  ckpt/simclr_resnet18_finetune_nipq_hot.pt            경량 fine-tuning 결과
-결과 (--output-dir, 기본 ./results):
-  summary.txt, summary.json                       최종 결과·판정 (json 에 세부 수치, 실행 명령)
-  simclr_resnet18_train_memory_comparison.png     학습 1 step 메모리 타임라인 (원본 / 경량 / 참고, 같은 Y 축)
-단계별 중간 파일은 임시 폴더에서 주고받고 끝나면 지운다.
+    python run_all.py --device cuda:0
 """
 import argparse
 import json
@@ -29,7 +19,7 @@ from core.common import BATCH, LABEL_FRAC, NAME, TRAIN_TARGET as TARGET, MiB  # 
 CALC_MODES = ["fp32", "nipq_hot", "nipq_hot_naive"]
 
 
-def _w(s):  # 터미널 표시 폭 (한글 2칸)
+def _w(s):  # display width (CJK = 2)
     return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
 
 
@@ -42,33 +32,32 @@ def rjust(s, n):
 
 
 def render(s):
-    """summary.json 내용 → summary.txt 줄 목록 (README 결과 표와 같은 항목만)."""
     ok = lambda v: "PASS" if v >= TARGET else "FAIL"  # noqa: E731
     mib = lambda v: f"{v / MiB:.1f}"  # noqa: E731
     acc, f, q = s["accuracy"], s["memory"]["fp32"], s["memory"]["nipq_hot"]
     fa, ha = acc["fp32"]["acc"], acc["nipq_hot"]["acc"]
     cr, mr = q["calc"]["reduction_pct"], q["measured"]["reduction_pct"]
     pk = "peak_training_tensors_bytes"
-    L, C = 34, 16
+    L, C = 38, 16
     line = lambda lab, *cs: ljust(lab, L) + "".join(rjust(c, C) for c in cs)  # noqa: E731
-    lines = [f"목표: 원본 FP32 대비 학습 메모리 {TARGET:.0f}% 이상 절감", "",
-             line("[Step 1 학습 평가]", "원본 FP32", "경량 NIPQ+HOT", "절감률", "판정"),
-             line(f"  fine-tuning 정확도 (라벨 1/{round(1 / LABEL_FRAC)})", f"{fa:.2f}%", f"{ha:.2f}%",
+    lines = [f"Target: training memory reduction >= {TARGET:.0f}% vs original FP32", "",
+             line("[Step 1 training]", "Original FP32", "NIPQ+HOT", "Reduction", "Verdict"),
+             line(f"  Fine-tuning accuracy (1/{round(1 / LABEL_FRAC)} labels)", f"{fa:.2f}%", f"{ha:.2f}%",
                   f"{ha - fa:+.2f}%p", "-"),
-             line("  학습 메모리 계산값 (MiB)", mib(f["calc"]["total_bytes"]), mib(q["calc"]["total_bytes"]),
+             line("  Training memory calc (MiB)", mib(f["calc"]["total_bytes"]), mib(q["calc"]["total_bytes"]),
                   f"{cr:.1f}%", ok(cr)),
-             line("  학습 메모리 실측 (MiB)", mib(f["measured"][pk]), mib(q["measured"][pk]), f"{mr:.1f}%", ok(mr)),
+             line("  Training memory meas. (MiB)", mib(f["measured"][pk]), mib(q["measured"][pk]), f"{mr:.1f}%", ok(mr)),
              ""]
     if not s["model_check"]["ok"]:
-        lines.append("모델 확인: FAIL (summary.json 의 model_check 참고)")
-    lines.append(f"최종 판정: {'PASS' if s['all_gates_passed'] else 'FAIL'}")
+        lines.append("Model check: FAIL (see model_check in summary.json)")
+    lines.append(f"Final verdict: {'PASS' if s['all_gates_passed'] else 'FAIL'}")
     return lines
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--data", default=None, help="CIFAR-10 폴더 (없으면 IITP_valid/data 에 자동 다운로드)")
+    p.add_argument("--data", default=None, help="CIFAR-10 dir (downloaded to IITP_valid/data if omitted)")
     p.add_argument("--output-dir", type=Path, default=ROOT / "results")
     a = p.parse_args()
     out = a.output_dir.resolve()
@@ -88,7 +77,7 @@ def main():
             print(f"\n▶ {label}", flush=True)
             cmd = [sys.executable, str(ROOT / script), *map(str, opts), "--output-dir", str(work)]
             if subprocess.run(cmd, cwd=ROOT, env=env).returncode:
-                raise RuntimeError(f"{label} 실패 (위 출력 참고)")
+                raise RuntimeError(f"{label} failed (see output above)")
 
         run("check_model.py", *dev, *data)
         run("memory_calc.py", *dev, *data)
@@ -121,7 +110,7 @@ def main():
     summary["commands"] = commands
     (out / "summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False) + "\n")
     (out / "summary.txt").write_text("\n".join(lines) + "\n")
-    print("\n" + "=" * 100 + "\n" + "\n".join(lines) + f"\n\n결과: {out}/summary.txt, summary.json, "
+    print("\n" + "=" * 100 + "\n" + "\n".join(lines) + f"\n\nResults: {out}/summary.txt, summary.json, "
           f"{NAME}_train_memory_comparison.png", flush=True)
     if not summary["all_gates_passed"]:
         sys.exit(2)

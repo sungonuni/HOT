@@ -88,16 +88,16 @@ python run_all.py --device cuda:0
 
 ### 1. Step 1 학습 평가
 
-| 평가 항목 | 원본 (FP32) | 경량 (NIPQ + HOT) | 절감률 | 판정 |
+| Step 1 training | Original FP32 | NIPQ+HOT | Reduction | Verdict |
 | ----- | ----- | ----- | ----- | ----- |
-| Fine-tuning 정확도 (라벨 1/10) | 84.55% | 83.65% | -0.90%p | \- |
-| 학습 메모리 계산값 | 2429.2 MiB | 945.4 MiB | 61.1% | PASS |
-| 학습 메모리 실측 | 2420.4 MiB | 1350.5 MiB | 44.2% | PASS |
+| Fine-tuning accuracy (1/10 labels) | 84.55% | 83.65% | -0.90%p | \- |
+| Training memory calc (MiB) | 2429.2 | 945.4 | 61.1% | PASS |
+| Training memory meas. (MiB) | 2420.4 | 1350.5 | 44.2% | PASS |
 
 ### 2. Step 2 추론 평가
 
-| 평가 항목 | 원본 (FP32) | 경량 (W4A4 배포 파일) | 절감률 | 판정 |
+| Step 2 inference | Original FP32 | W4A4 | Reduction | Verdict |
 | ----- | ----- | ----- | ----- | ----- |
-| 정확도 | 84.55% | 83.64% | -0.91%p | \- |
-| 추론 메모리 계산값 | 43.357 MiB | 5.454 MiB | 87.4% | PASS |
-| 추론 메모리 실측 | 43.621 MiB | 5.669 MiB | 87.0% | PASS |
+| Accuracy | 84.55% | 83.64% | -0.91%p | \- |
+| Inference memory calc (MiB) | 43.357 | 5.454 | 87.4% | PASS |
+| Inference memory meas. (MiB) | 43.621 | 5.669 | 87.0% | PASS |

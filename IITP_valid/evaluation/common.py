@@ -1,4 +1,4 @@
-"""Step 2 공통: 경로·설정·모델 불러오기 (Step 1 이 만든 models/ 의 원본 FP32 ckpt 와 W4A4 배포 파일만 사용)."""
+"""Step 2 shared paths, settings and model loading."""
 import os
 import sys
 
@@ -15,7 +15,7 @@ QLABEL = f"W{W_BITS}A{A_BITS}"
 
 
 def load_fp32(dev="cpu", fold=False):
-    """원본 FP32 모델 (fold=True 면 BN 을 conv 에 합친 배포 형태)."""
+    """fold=True: BN folded into conv."""
     m = build_model()
     m.load_state_dict(torch.load(FP32_MODEL, map_location="cpu")["state_dict"])
     if fold:

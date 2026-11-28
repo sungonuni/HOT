@@ -1,12 +1,6 @@
-"""Step 2 실제 GPU 추론 메모리 측정 (이미지 1장 추론) + PyTorch 메모리 타임라인 그림 (torch.profiler).
-원본 FP32 와 W4A4 를 각각 별도 프로세스로 실행하고, 그림은 같은 Y 축으로 위아래 합친다.
+"""Step 2 measured GPU inference memory (batch 1) and memory timeline plot.
 
-측정값
-  - peak_model_tensors : 추론 중 GPU 텐서 메모리 피크 (가중치 + activation + 런타임 임시 버퍼).
-                         CUDA 메모리 할당 기록을 시간순으로 다시 더해서 구하고, cuDNN 이 conv 알고리즘용으로
-                         잠깐 잡는 작업공간은 뺀다.
-  - peak_allocated     : 위 값에 cuDNN 작업공간까지 포함한 값 (torch.cuda.max_memory_allocated)
-  cuBLAS 작업공간은 CUBLAS_WORKSPACE_CONFIG=:0:0 으로 끈다.
+peak_model_tensors excludes cuDNN workspace; peak_allocated includes it.
 
     python memory_profile.py --mode fp32
     python memory_profile.py --mode w4a4
@@ -20,7 +14,7 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":0:0")
 import tempfile  # noqa: E402
 
 _ntf = tempfile.NamedTemporaryFile
-# PyTorch export_memory_timeline(html) 버그 우회: 임시 PNG 를 "wb" 로 열고 다시 읽음 → "w+b" 로 열게 함 (그림 내용 무관)
+# Workaround: export_memory_timeline opens its temp PNG with "wb" and then reads it back.
 tempfile.NamedTemporaryFile = lambda mode="w+b", *a, **k: _ntf("w+b" if mode == "wb" else mode, *a, **k)
 import matplotlib  # noqa: E402
 
@@ -39,7 +33,7 @@ MODES = ["fp32", "w4a4"]
 
 
 class Registry(nn.Module):
-    """프로파일러가 가중치 저장공간을 PARAMETER 로 분류하도록 같은 저장공간을 가리키는 별칭만 등록 (복사 없음)."""
+    """Registers weight storage as parameters so the profiler labels it PARAMETER (no copy)."""
 
     def __init__(self, tensors):
         super().__init__()
@@ -51,7 +45,7 @@ class Registry(nn.Module):
 
 
 def replay_peak(snapshot, device_index):
-    """할당 기록을 시간순으로 다시 더함: (전체 피크, cuDNN 작업공간 제외 피크, 동시에 잡힌 cuDNN 작업공간 최대)."""
+    """Replay alloc trace -> (peak, peak without cuDNN workspace, peak cuDNN workspace)."""
     ws, cur_all, cur_model, cur_ws, pk_all, pk_model, pk_ws = set(), 0, 0, 0, 0, 0, 0
     for e in snapshot["device_traces"][device_index]:
         if e["action"] == "alloc":
@@ -94,7 +88,7 @@ def capture(a):
     x = to_input(xte[:1]).to(dev)
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
     with torch.inference_mode():
-        for _ in range(3):  # 워밍업: cuDNN 핸들 생성·알고리즘 선택
+        for _ in range(3):  # warmup
             fn(x)
         torch.cuda.synchronize(dev)
         torch.cuda.reset_peak_memory_stats(dev)
@@ -106,7 +100,6 @@ def capture(a):
         torch.cuda.memory._record_memory_history(enabled=None)
         peak = torch.cuda.max_memory_allocated(dev)
     pk_all, pk_model, pk_ws = replay_peak(snap, idx)
-    # PyTorch 메모리 타임라인 (그림용, 별도 실행 1회)
     with torch.inference_mode():
         with profile(activities=[ProfilerActivity.CPU], record_shapes=True, profile_memory=True, with_stack=True) as prof:
             reg(x)
@@ -114,15 +107,15 @@ def capture(a):
             torch.cuda.synchronize(dev)
     tag = a.mode
     out = a.output_dir
-    with tempfile.TemporaryDirectory() as tmp:  # PyTorch 출력(html·원시 json)은 그림에만 쓰고 버림
-        prof.export_memory_timeline(os.path.join(tmp, "timeline.html"), device=str(dev))  # 그림을 그림
+    with tempfile.TemporaryDirectory() as tmp:
+        prof.export_memory_timeline(os.path.join(tmp, "timeline.html"), device=str(dev))
         fig = plt.gcf()
         prof.mem_tl.export_memory_timeline(os.path.join(tmp, "timeline.json"), str(dev))
         _, sizes = json.load(open(os.path.join(tmp, "timeline.json")))
     tl_peak = max(map(sum, sizes))
-    assert tl_peak <= YLIM_MIB * MiB, "그림 Y 축 범위를 넘음"
+    assert tl_peak <= YLIM_MIB * MiB, "plot exceeds Y-axis limit"
     ax = fig.axes[0]
-    ax.set_ylim(0, YLIM_MIB / 1024)  # PyTorch 그림 단위는 GiB → 눈금만 MiB 로 표시
+    ax.set_ylim(0, YLIM_MIB / 1024)  # plot is in GiB; label ticks in MiB
     ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v * 1024:.0f}"))
     ax.set_ylabel("PyTorch tensor memory (MiB)")
     ax.set_title(f"{TITLE} | {label} | peak {tl_peak / MiB:.2f} MiB "
@@ -139,14 +132,14 @@ def capture(a):
          "gpu": torch.cuda.get_device_name(dev), "torch": torch.__version__}
     json.dump(r, open(os.path.join(out, f"{tag}_memory.json"), "w"), indent=1, ensure_ascii=False)
     print(f"[{TITLE}] {label}\n"
-          f"  가중치 상주 {weights / MiB:.3f} MiB | 추론 중 피크 {(before + pk_model) / MiB:.3f} MiB "
-          f"(cuDNN 작업공간 제외)", flush=True)
+          f"  resident weights {weights / MiB:.3f} MiB | inference peak {(before + pk_model) / MiB:.3f} MiB "
+          f"(excl. cuDNN workspace)", flush=True)
 
 
 def combine(a):
     tags = MODES
     meta = [json.load(open(os.path.join(a.output_dir, f"{t}_memory.json"))) for t in tags]
-    assert all(m["gpu"] == meta[0]["gpu"] and m["input"] == meta[0]["input"] for m in meta), "측정 조건 불일치"
+    assert all(m["gpu"] == meta[0]["gpu"] and m["input"] == meta[0]["input"] for m in meta), "measurement conditions differ"
     fig, axes = plt.subplots(len(tags), 1, figsize=(14, 4 * len(tags)), layout="constrained")
     for ax, t in zip(axes, tags):
         ax.imshow(plt.imread(os.path.join(a.output_dir, f"{t}_memory.png")))
@@ -154,7 +147,7 @@ def combine(a):
     png = os.path.join(a.output_dir, "simclr_resnet18_infer_memory_comparison.png")
     fig.savefig(png, dpi=130, bbox_inches="tight")
     plt.close(fig)
-    print(f"그림: 위에서부터 원본 FP32, {QLABEL} (같은 Y 축) → {png}", flush=True)
+    print(f"Plot: original FP32 (top), {QLABEL} (bottom), shared Y axis -> {png}", flush=True)
 
 
 def main():
@@ -164,8 +157,8 @@ def main():
     g.add_argument("--combine", action="store_true")
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--data", default=None)
-    p.add_argument("--chunk", type=int, default=16, help="경량 모델: 채널 몇 개씩 복원 (0 = 층 전체)")
-    p.add_argument("--dtype", default="fp32", choices=["fp32", "bf16"], help="경량 모델: 복원 정밀도")
+    p.add_argument("--chunk", type=int, default=16, help="W4A4: channels dequantized per chunk (0 = whole layer)")
+    p.add_argument("--dtype", default="fp32", choices=["fp32", "bf16"], help="W4A4: dequantization dtype")
     p.add_argument("--output-dir", default=RESULTS)
     a = p.parse_args()
     os.makedirs(a.output_dir, exist_ok=True)
